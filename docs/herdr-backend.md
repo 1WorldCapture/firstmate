@@ -246,6 +246,12 @@ A pane already mid-turn cannot borrow a rendered-footer transition as proof of t
 The composer verdict itself is deliberately unchanged: a right-aligned status token on the composer row stays content for every other caller, including the away-mode pre-injection guard.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed native transition falls through to the composer verdict rather than reporting a false swallow.
 
+Spawn-time brief delivery for Kimi never rides the pane plane on this backend.
+Readiness is a bounded `agent wait --until idle`, the pointer rides an `agent prompt --wait` that blocks until the agent is observed working, and a swallowed submission surfaces as a loud `agent_prompt_stalled` spawn failure instead of a healthy-looking pane holding no brief.
+The launch command and its pre-launch shell steps stay on the pane plane, and every other backend keeps the shared pane-plane readiness gate and submit core for Kimi.
+`agent wait` fails fast with `agent_not_found` while a fresh launch is still registering, so the adapter retries the not-found race through a bounded registration window before treating it as a readiness failure.
+The screen-evidence postcondition behind the same delivery depends on the fleet-wide composer reader bounding Kimi's composer box at its two-row status footer, because a cursorless capture otherwise rejects the box and delivery can never confirm.
+
 `pane read --lines N` can return empty output when N is below the viewport height.
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
 This generous floor is required for small composer and peek reads.
@@ -357,6 +363,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 ```sh
 tests/fm-backend-herdr.test.sh
 tests/fm-composer-lib.test.sh
+tests/fm-kimi-harness.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 tests/fm-backend-herdr-smoke.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh

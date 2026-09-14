@@ -798,6 +798,36 @@ fm_backend_busy_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_wait_agent_idle: block until <target>'s native agent state is
+# idle, bounded by <timeout-ms>. Only a backend with a native agent plane
+# can implement this; callers gate on the backend before reaching here, so
+# any other backend is a routing bug and refuses loudly rather than
+# degrading to a pane-plane guess.
+fm_backend_wait_agent_idle() {  # <backend> <target> <timeout-ms>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_wait_agent_idle "$@" ;;
+    *) echo "error: no agent-idle wait implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
+# fm_backend_agent_prompt: deliver <text> through <target>'s native agent
+# prompt plane, blocking until the agent is observed working (bounded by
+# <timeout-ms>) so a swallowed submission fails loudly instead of silently
+# dropping the text. Same backend-capability contract as
+# fm_backend_wait_agent_idle directly above.
+fm_backend_agent_prompt() {  # <backend> <target> <text> <timeout-ms>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    herdr) fm_backend_herdr_agent_prompt "$@" ;;
+    *) echo "error: no agent prompt implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
 # fm_backend_composer_state: classify the composer/input area of <target> as
 # empty|pending|pending-unproven|unknown for callers that need a pre-submit
 # input guard, a submit acknowledgement, or a launch-readiness check. It is

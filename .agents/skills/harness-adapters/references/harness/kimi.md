@@ -1,6 +1,6 @@
 # Kimi Code
 
-Verified on 2026-07-25 with Kimi Code CLI 0.29.1; workspace-trust behavior reverified 2026-09-14 on 0.42.0.
+Verified on 2026-07-25 with Kimi Code CLI 0.29.1; workspace-trust behavior and herdr agent-plane brief delivery reverified 2026-09-14 on 0.42.0.
 
 ## Operating facts
 
@@ -17,7 +17,7 @@ Verified on 2026-07-25 with Kimi Code CLI 0.29.1; workspace-trust behavior rever
 | Trust dialog | "Trust this folder?" gates a directory Kimi has never seen on first launch as of 0.42.0 (0.29.1 showed none); every spawn pre-registers the directory, which removes the dialog. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; identity comes from process ancestry command name `kimi`, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding. |
-| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
+| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text; 0.42.0 draws a two-row status footer (mode/model/path/hints, then right-aligned context usage) directly below the box with no blank separator, and the shared reader treats that named furniture as bounding the box. |
 | Effort | No verified reasoning-effort flag; `references/common/model-and-effort.md` owns unsupported-value handling. |
 
 ## Readiness-gated start
@@ -25,6 +25,8 @@ Verified on 2026-07-25 with Kimi Code CLI 0.29.1; workspace-trust behavior rever
 `../../../bin/fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
 This launch-then-send shape is mandatory because Kimi rejects positional instructions as an unknown command.
 The path must be absolute because the instructions live outside the task worktree and Kimi reads them there without `--add-dir`.
+On herdr the pane plane never carries the pointer: readiness rides `herdr agent wait --until idle` and the pointer rides `herdr agent prompt --wait`, so a swallowed submission fails loudly instead of dropping the brief silently while the pane still looks healthy; `../../../docs/herdr-backend.md` under "Current transport behavior" owns that split and its bounded agent-registration retry.
+On herdr the composer verdict also depends on bounding the box at Kimi's status footer, because the cursorless reader rejects a box whose next row is unrecognized non-blank content and 0.42.0 always draws that footer directly below the box.
 
 Sending before readiness was reproduced as a silent drop with zero exit status, an empty composer, `context: 0%`, no echoed user message, and a healthy-looking idle pane.
 The startup input-readiness window is the established cause; the banner is not.

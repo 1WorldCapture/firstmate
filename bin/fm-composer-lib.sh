@@ -426,6 +426,26 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # never on the composer row itself.
 FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
 
+# Kimi draws a two-row status footer DIRECTLY below its composer box with no
+# blank row between: a mode/model/path row, then the right-aligned context
+# usage row. Verified live on Kimi Code CLI 0.42.0 under Herdr 0.9.0 (pane
+# read, ANSI and plain alike):
+# ` Never Ask  K3 thinking: high  …/project-acf3a6/1/project    ctrl+o expand | ! to run a shell command`
+# `                                                                   context: 3% (23k/1M)`
+# A row is Kimi status furniture when it carries the thinking-effort cell
+# (`thinking: high`), the composer hint cluster's `ctrl+o expand | !` head, or
+# the context-usage cell (`context: 3% (23k/1M)`, the same shape fm-spawn's
+# kimi delivery postcondition trusts). It is consulted only as the boundary
+# directly below a proven composer BOX on the cursorless selection path: a
+# cursor-carrying backend anchors the box at the cursor and never reaches the
+# rule. Without it every Kimi 0.42 screen reads `unknown` on a cursorless
+# backend, so kimi brief delivery can never confirm - measured live as a spawn
+# that delivered the pointer, printed the ✨ echo, and still failed its
+# confirmation window after 120s. This stays a named-furniture exception: any
+# other non-blank edge-free row below a box still disqualifies it, preserving
+# the strict blank-row injection posture.
+FM_COMPOSER_KIMI_STATUS_RE_DEFAULT='[[:space:]]thinking:[[:space:]]+[a-z]+([[:space:]]{2,}|$)|ctrl\+o expand[[:space:]]*\|[[:space:]]*!|context:[[:space:]]*[0-9]+(\.[0-9]+)?%[[:space:]]*\('
+
 # The bounded row window adapters should capture for a composer read. One
 # shared policy (previously three per-backend variables that had drifted to
 # 20/20/200): the composer is bottom-anchored, so a small tail window is
@@ -985,6 +1005,14 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_row_is_kimi_status: 0 when the trimmed row is Kimi's status
+# footer (FM_COMPOSER_KIMI_STATUS_RE_DEFAULT above) - composer furniture that
+# sits directly below the composer box and must bound that box exactly as an
+# edge does on the cursorless selection path.
+_fm_composer_row_is_kimi_status() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_KIMI_STATUS_RE:-$FM_COMPOSER_KIMI_STATUS_RE_DEFAULT}" sensitive
+}
+
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
 # through <cursor-row> is non-blank and carries no structural edge - the
 # contiguity proof that those rows are the bare composer's wrapped input
@@ -1159,8 +1187,14 @@ _fm_composer_select_cursorless() {
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
     if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed"; then
-      FM_COMPOSER_SELECTED_KIND=
-      return 1
+      # Kimi's status footer is the one named furniture a proven composer box
+      # may rest directly on; every other non-blank edge-free row below a box
+      # still disqualifies it.
+      if [ "$FM_COMPOSER_SELECTED_KIND" != box ] \
+         || ! _fm_composer_row_is_kimi_status "$trimmed"; then
+        FM_COMPOSER_SELECTED_KIND=
+        return 1
+      fi
     fi
   fi
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
