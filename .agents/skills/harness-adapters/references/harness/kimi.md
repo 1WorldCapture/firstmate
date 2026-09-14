@@ -1,6 +1,6 @@
 # Kimi Code
 
-Verified on 2026-09-17 with Kimi Code CLI 2.0.0.
+Verified on 2026-09-17 with Kimi Code CLI 2.0.0; workspace-trust pre-registration verified 2026-09-14 on 0.42.0 (initial verification 2026-07-25 on 0.29.1).
 
 ## Operating facts
 
@@ -14,7 +14,7 @@ Verified on 2026-09-17 with Kimi Code CLI 2.0.0.
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Firstmate skills are discovered. |
 | Autonomy | `--auto` is the `Never Ask` tier; `-y` and `--yolo` now select the distinct, weaker `Ask When Needed` tier and are not used. |
-| Trust dialog | A fresh worktree shows `Trust this folder?` with `Trust this folder` pre-selected; spawn reads the visible pane, recognizes the complete dialog (its title, both navigation-hint tokens `↑↓ navigate` and `Enter select` - matched separately so a hint wrapped in a narrow pane still counts - the selected `❯ Trust this folder`, and `Don't trust`), sends Enter on every poll the complete dialog is still there, verifies that a later visible-pane capture no longer contains it, and then continues the ordinary readiness gate. Trust is never pre-registered in `config.toml`; the dialog is answered live. |
+| Trust dialog | A fresh worktree shows `Trust this folder?` with `Trust this folder` pre-selected when the directory was not pre-registered. Every spawn pre-registers the directory first (see `Workspace trust` below), which removes the dialog; if it appears anyway, spawn reads the visible pane, recognizes the complete dialog (its title, both navigation-hint tokens `↑↓ navigate` and `Enter select` - matched separately so a hint wrapped in a narrow pane still counts - the selected `❯ Trust this folder`, and `Don't trust`), sends Enter on every poll the complete dialog is still there, and verifies that a later visible-pane capture no longer contains it before the ordinary readiness gate continues. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; identity comes from process ancestry command name `kimi`, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding. |
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
@@ -39,6 +39,15 @@ The delivery-only matcher requires the observed whitespace, deliberately exclude
 Kimi's footer tip can show `ctrl+c: cancel` while idle, and its idle bar can contain lowercase `thinking` as an effort label.
 Neither is a busy-state source.
 The delivery-only spinner match covers the full moon-phase glyph set but remains locale- and emoji-font-sensitive because Kimi exposes no stable ASCII busy token.
+
+## Workspace trust
+
+Kimi Code 0.42.0 gates a directory it has never seen behind an interactive "Trust this folder?" dialog on first launch; 0.29.1 showed none, which is why this file first recorded the dialog as absent.
+No launch flag suppresses it, and the dialog parks the pane before the brief pointer is ever read, so an unregistered spawn fails the readiness gate with "kimi did not show a verified ready signal before brief delivery".
+`../../../bin/fm-spawn.sh` therefore pre-registers the directory the pane starts in before launch - the task worktree for a ship or scout, the home for a `--secondmate` spawn - and refuses the spawn when the registration fails rather than launching a worker that would wedge.
+`../../../bin/fm-kimi-trust.sh` owns the store shape, the idempotent skip, and the scope tests; its header comment is the one owner of that contract.
+Pre-registration is the primary control: it removes the dialog before launch, and a failed registration refuses the spawn.
+The readiness loop also carries a live-answer backstop for a dialog that appears anyway - a Kimi release that changed the store shape, or a registration that did not take effect: it recognizes the complete dialog, answers it with Enter until a later visible capture proves it cleared, and never counts a pane with dialog text as ready (`Readiness-gated start` above owns that loop). A visible trust dialog therefore no longer wedges a spawn, but it still means pre-registration did not take effect - inspect the store and the spawn's diagnostics once the spawn settles.
 
 ## Crew turn-end hook and primary limit
 
