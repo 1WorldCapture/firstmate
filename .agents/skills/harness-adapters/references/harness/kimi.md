@@ -1,6 +1,6 @@
 # Kimi Code
 
-Verified on 2026-07-25 with Kimi Code CLI 0.29.1.
+Verified on 2026-07-25 with Kimi Code CLI 0.29.1; workspace-trust behavior reverified 2026-09-14 on 0.42.0.
 
 ## Operating facts
 
@@ -14,7 +14,7 @@ Verified on 2026-07-25 with Kimi Code CLI 0.29.1.
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Firstmate skills are discovered. |
 | Autonomy | `--auto`; `-y` and `--yolo` are weaker and are not used. |
-| Trust dialog | None observed on a clean first launch in a fresh pooled worktree. |
+| Trust dialog | "Trust this folder?" gates a directory Kimi has never seen on first launch as of 0.42.0 (0.29.1 showed none); every spawn pre-registers the directory, which removes the dialog. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; identity comes from process ancestry command name `kimi`, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding. |
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
@@ -37,6 +37,15 @@ The delivery-only matcher requires the observed whitespace, deliberately exclude
 Kimi's footer tip can show `ctrl+c: cancel` while idle, and its idle bar can contain lowercase `thinking` as an effort label.
 Neither is a busy-state source.
 The delivery-only spinner match covers the full moon-phase glyph set but remains locale- and emoji-font-sensitive because Kimi exposes no stable ASCII busy token.
+
+## Workspace trust
+
+Kimi Code 0.42.0 gates a directory it has never seen behind an interactive "Trust this folder?" dialog on first launch; 0.29.1 showed none, which is why this file first recorded the dialog as absent.
+No launch flag suppresses it, and the dialog parks the pane before the brief pointer is ever read, so an unregistered spawn fails the readiness gate with "kimi did not show a verified ready signal before brief delivery".
+`../../../bin/fm-spawn.sh` therefore pre-registers the directory the pane starts in before launch - the task worktree for a ship or scout, the home for a `--secondmate` spawn - and refuses the spawn when the registration fails rather than launching a worker that would wedge.
+`../../../bin/fm-kimi-trust.sh` owns the store shape, the idempotent skip, and the scope tests; its header comment is the one owner of that contract.
+Pre-registration is deliberately the only control: the captain chose it over post-launch dialog detection or Enter-answering, so never try to answer the dialog with a key.
+A visible trust dialog means pre-registration did not take effect - inspect the store and the spawn's error output rather than sending keys.
 
 ## Crew turn-end hook and primary limit
 
