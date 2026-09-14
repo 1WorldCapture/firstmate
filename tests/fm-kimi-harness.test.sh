@@ -281,6 +281,106 @@ $1
 EOF
 }
 
+# --- workspace-trust pre-registration ----------------------------------------
+#
+# The unit half drives bin/fm-kimi-trust.sh directly against a throwaway HOME,
+# so nothing here touches the developer's real ~/.kimi-code store. The spawn
+# half below rides the kimi fake world above, whose HOME is the fixture home,
+# for the same reason.
+
+TRUST="$ROOT/bin/fm-kimi-trust.sh"
+
+make_trust_case() {  # <name> -> "<case>|<proj>|<wt>|<home>"
+  local name=$1 case_dir proj wt home
+  case_dir="$TMP_ROOT/trust-$name"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  home="$case_dir/home"
+  mkdir -p "$home"
+  fm_git_worktree "$proj" "$wt" "wt-trust-$name"
+  printf '%s|%s|%s|%s\n' "$case_dir" "$proj" "$wt" "$home"
+}
+
+read_trust_case() {
+  IFS='|' read -r TRUST_CASE_DIR TRUST_PROJ TRUST_WT TRUST_HOME <<EOF
+$1
+EOF
+}
+
+run_trust() {  # <home> <worktree> <project>
+  HOME="$1" "$TRUST" "$2" "$3" 2>&1
+}
+
+run_home_trust() {  # <seeded-home> <user-home> <id>
+  HOME="$2" "$TRUST" --secondmate-home "$1" "$3" 2>&1
+}
+
+trust_store() {  # <home>
+  printf '%s\n' "$1/.kimi-code/workspace-trust"
+}
+
+# The record file name Kimi itself computes, rebuilt here from the verified
+# store contract so the assertions judge the on-disk shape rather than the
+# script's own bytes.
+kimi_record_path() {  # <store> <root>
+  # shellcheck disable=SC2016 # The template literal is JavaScript, not this test shell.
+  node -e '
+    const path = require("node:path");
+    const crypto = require("node:crypto");
+    const root = process.argv[2];
+    const hash = crypto.createHash("sha256").update(root, "utf8").digest("hex").slice(0, 12);
+    process.stdout.write(path.join(process.argv[1], `wd_${path.basename(root)}_${hash}`));
+  ' "$1" "$2"
+}
+
+assert_kimi_trusted() {  # <store> <root> <msg>
+  local file
+  file=$(kimi_record_path "$1" "$2")
+  [ -f "$file" ] || fail "$3 (no record at $file)"
+  node -e 'process.exit(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).root === process.argv[2] ? 0 : 1)' \
+    "$file" "$2" || fail "$3 (record at $file names another root: $(cat "$file"))"
+}
+
+assert_kimi_not_trusted() {  # <store> <root> <msg>
+  [ ! -e "$(kimi_record_path "$1" "$2")" ] || fail "$3"
+  return 0
+}
+
+file_mode() {  # <file> -> symbolic-free octal mode on macOS and Linux alike
+  stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"
+}
+
+# seed_secondmate_home <home> <id> [shape]: the on-disk shape
+# bin/fm-home-seed.sh leaves behind, in both seeded shapes - "clone" (the
+# default) a standalone repo checkout, "worktree" a linked worktree.
+seed_secondmate_home() {
+  local home=$1 id=$2 shape=${3:-clone} src
+  case "$shape" in
+    worktree)
+      src="$home.src"
+      fm_git_worktree "$src" "$home" "sm-$id"
+      ;;
+    *)
+      mkdir -p "$home"
+      fm_git_init_commit "$home"
+      ;;
+  esac
+  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+}
+
+# A PATH carrying the tools the scope test needs but no node, so the
+# missing-interpreter path is exercised without disturbing the real PATH.
+node_free_path() {  # <case-dir>
+  local dir=$1/nonode-bin tool
+  mkdir -p "$dir"
+  for tool in bash env git mkdir; do
+    ln -sf "$(command -v "$tool")" "$dir/$tool"
+  done
+  printf '%s\n' "$dir"
+}
+
 test_kimi_launch_then_send_is_verified() {
   local id rec out rc launch pointer brief_real meta task_tmp launch_dir launch_file launch_base
   id="kimi-success-z1-$$"
@@ -1121,6 +1221,340 @@ test_kimi_bordered_prompt_needs_no_override() {
   pass "composer classifier: kimi's existing bordered > shape is already safe without an override"
 }
 
+# Kimi's store is one file per trusted directory, so a pre-registered spawn is
+# indistinguishable from a hand-accepted dialog only when the record carries
+# exactly the byte shape this pinned against the live 0.42.0 store: the
+# wd_<basename>_<hash> name, compact single-line JSON with no trailing
+# newline, a millisecond trustedAt, and mode 0600.
+test_kimi_trust_writes_the_verified_store_record_shape() {
+  local rec store file out first_copy foreign
+  rec=$(make_trust_case record)
+  read_trust_case "$rec"
+  store=$(trust_store "$TRUST_HOME")
+  out=$(run_trust "$TRUST_HOME" "$TRUST_WT" "$TRUST_PROJ")
+  expect_code 0 $? "a fresh linked worktree must be trusted: $out"
+  assert_contains "$out" "trusted: $TRUST_WT" "registration did not report the trusted path"
+  assert_kimi_trusted "$store" "$TRUST_WT" "the worktree was not recorded as trusted"
+  file=$(kimi_record_path "$store" "$TRUST_WT")
+  node -e '
+    const fs = require("node:fs");
+    const text = fs.readFileSync(process.argv[1], "utf8");
+    const parsed = JSON.parse(text);
+    const ok = parsed.root === process.argv[2]
+      && Number.isInteger(parsed.trustedAt)
+      && parsed.trustedAt > 1e12
+      && parsed.trustedAt <= Date.now() + 1000
+      && !text.includes("\n")
+      && JSON.stringify(parsed) === text;
+    process.exit(ok ? 0 : 1);
+  ' "$file" "$TRUST_WT" \
+    || fail "the trust record is not the compact exact-shape JSON Kimi writes: $(cat "$file")"
+  [ "$(file_mode "$file")" = 600 ] \
+    || fail "the trust record must be mode 0600 like every Kimi-owned record"
+  cp "$file" "$TRUST_CASE_DIR/first-record"
+  out=$(run_trust "$TRUST_HOME" "$TRUST_WT" "$TRUST_PROJ")
+  expect_code 0 $? "a repeat registration must succeed: $out"
+  cmp -s "$TRUST_CASE_DIR/first-record" "$file" \
+    || fail "a repeat registration rewrote a record this script does not own"
+  foreign="$store/wd_elsewhere_000000000000"
+  printf '%s' '{"root":"/elsewhere","trustedAt":1}' > "$foreign"
+  out=$(run_trust "$TRUST_HOME" "$TRUST_WT" "$TRUST_PROJ")
+  expect_code 0 $? "a registration must succeed beside an unrelated record: $out"
+  cmp -s "$foreign" "$foreign" || true
+  [ "$(cat "$foreign")" = '{"root":"/elsewhere","trustedAt":1}' ] \
+    || fail "a registration disturbed an unrelated record in Kimi's store"
+  pass "fm-kimi-trust.sh: writes the exact record shape Kimi writes, idempotently, preserving foreign records"
+}
+
+# Whether the running CLI hashes the pane's logical or resolved path is not
+# verified, so both forms are registered when they differ, exactly as
+# bin/fm-agy-trust.sh does; identical forms must collapse to one record.
+test_kimi_trust_registers_the_logical_and_resolved_paths() {
+  local rec store link out count
+  rec=$(make_trust_case dual-path)
+  read_trust_case "$rec"
+  store=$(trust_store "$TRUST_HOME")
+  link="$TRUST_CASE_DIR/wt-link"
+  ln -s "$TRUST_WT" "$link"
+  out=$(run_trust "$TRUST_HOME" "$link" "$TRUST_PROJ")
+  expect_code 0 $? "a symlinked worktree must be trusted: $out"
+  assert_kimi_trusted "$store" "$TRUST_WT" "the resolved worktree path was not registered"
+  assert_kimi_trusted "$store" "$TRUST_CASE_DIR/wt-link" "the logical pane path was not registered alongside it"
+  count=$(find "$store" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')
+  [ "$count" -eq 2 ] || fail "two path forms must leave exactly two records, found $count"
+  out=$(run_trust "$TRUST_HOME" "$link" "$TRUST_PROJ")
+  expect_code 0 $? "a repeat registration must succeed: $out"
+  count=$(find "$store" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')
+  [ "$count" -eq 2 ] || fail "a repeat registration duplicated a record ($count files)"
+  pass "fm-kimi-trust.sh: registers the logical and resolved paths without duplicating either"
+}
+
+test_kimi_trust_refuses_out_of_scope_paths() {
+  local rec store out rc plain sub other other_wt
+  rec=$(make_trust_case scope)
+  read_trust_case "$rec"
+  store=$(trust_store "$TRUST_HOME")
+
+  rc=0; out=$(run_trust "$TRUST_HOME" "$TRUST_PROJ" "$TRUST_PROJ") || rc=$?
+  [ "$rc" -ne 0 ] || fail "the primary checkout must be refused"
+  assert_contains "$out" "primary checkout" "primary-checkout refusal lacked its reason"
+  assert_kimi_not_trusted "$store" "$TRUST_PROJ" "a refused primary checkout was registered"
+
+  rc=0; out=$(run_trust "$TRUST_HOME" "$TRUST_HOME" "$TRUST_PROJ") || rc=$?
+  [ "$rc" -ne 0 ] || fail "the home directory must be refused"
+  assert_contains "$out" "home directory" "home-directory refusal lacked its reason"
+  assert_kimi_not_trusted "$store" "$TRUST_HOME" "a refused home directory was registered"
+
+  plain="$TRUST_CASE_DIR/plain"; mkdir -p "$plain"
+  rc=0; out=$(run_trust "$TRUST_HOME" "$plain" "$TRUST_PROJ") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a plain directory must be refused"
+  assert_contains "$out" "not inside a git repository" "plain-directory refusal lacked its reason"
+  assert_kimi_not_trusted "$store" "$plain" "a refused plain directory was registered"
+
+  sub="$TRUST_WT/sub"; mkdir -p "$sub"
+  rc=0; out=$(run_trust "$TRUST_HOME" "$sub" "$TRUST_PROJ") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a worktree subdirectory must be refused"
+  assert_contains "$out" "not a worktree root" "subdirectory refusal lacked its reason"
+  assert_kimi_not_trusted "$store" "$sub" "a refused worktree subdirectory was registered"
+
+  other="$TRUST_CASE_DIR/other-project"
+  other_wt="$TRUST_CASE_DIR/other-wt"
+  fm_git_worktree "$other" "$other_wt" wt-other
+  rc=0; out=$(run_trust "$TRUST_HOME" "$other_wt" "$TRUST_PROJ") || rc=$?
+  [ "$rc" -ne 0 ] || fail "another project's worktree must be refused"
+  assert_contains "$out" "not a worktree of project" "foreign-project refusal lacked its reason"
+  assert_kimi_not_trusted "$store" "$other_wt" "a foreign project's worktree was registered"
+
+  rc=0; out=$(run_trust "$TRUST_HOME" "$TRUST_CASE_DIR/missing" "$TRUST_PROJ") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a nonexistent path must be refused"
+  assert_contains "$out" "not an accessible directory" "missing-path refusal lacked its reason"
+
+  pass "fm-kimi-trust.sh: refuses every out-of-scope path"
+}
+
+# CDPATH would redirect a relative cd into an unrelated directory and the git
+# env overrides make a primary checkout report a linked worktree's git dir, so
+# both must fail to move the boundary the refusals above rest on.
+test_kimi_trust_scope_survives_hostile_caller_environment() {
+  local rec store out rc
+  rec=$(make_trust_case hostile-env)
+  read_trust_case "$rec"
+  store=$(trust_store "$TRUST_HOME")
+  mkdir -p "$TRUST_CASE_DIR/decoy/.git"
+  CDPATH="$TRUST_CASE_DIR/decoy" \
+    GIT_DIR=$(git -C "$TRUST_WT" rev-parse --absolute-git-dir) \
+    GIT_WORK_TREE=$TRUST_PROJ \
+    out=$(run_trust "$TRUST_HOME" "$TRUST_PROJ" "$TRUST_PROJ") || rc=$?
+  unset CDPATH GIT_DIR GIT_WORK_TREE
+  [ "${rc:-0}" -ne 0 ] || fail "hostile caller environment let the primary checkout through: $out"
+  assert_contains "$out" "primary checkout" "the refusal did not name the primary checkout"
+  assert_kimi_not_trusted "$store" "$TRUST_PROJ" "hostile caller environment let the primary checkout be trusted"
+  pass "fm-kimi-trust.sh: the scope refusal survives a hostile caller environment"
+}
+
+# The store is Kimi's, so a record that exists under the name this registration
+# would use but names a different root - a corrupted entry or a hash collision
+# - must refuse the whole registration rather than overwrite bytes this script
+# does not own.
+test_kimi_trust_refuses_a_foreign_record_under_the_same_name() {
+  local rec store file out rc before
+  rec=$(make_trust_case foreign-record)
+  read_trust_case "$rec"
+  store=$(trust_store "$TRUST_HOME")
+  mkdir -p "$store"
+  file=$(kimi_record_path "$store" "$TRUST_WT")
+  printf '%s' '{"root":"/somewhere/else","trustedAt":1}' > "$file"
+  before=$(cat "$file")
+  rc=0; out=$(run_trust "$TRUST_HOME" "$TRUST_WT" "$TRUST_PROJ") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a record naming another root must be refused: $out"
+  assert_contains "$out" "refusing to overwrite" "the refusal did not name the non-ownership reason"
+  [ "$(cat "$file")" = "$before" ] || fail "the foreign record was overwritten despite the refusal"
+  printf '%s' 'not json' > "$file"
+  before=$(cat "$file")
+  rc=0; out=$(run_trust "$TRUST_HOME" "$TRUST_WT" "$TRUST_PROJ") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unparseable record must be refused: $out"
+  [ "$(cat "$file")" = "$before" ] || fail "the unparseable record was rewritten"
+  pass "fm-kimi-trust.sh: refuses a foreign or broken record under the name it would write"
+}
+
+# Registering trust is what keeps a worker off the dialog, so a missing node
+# refuses rather than degrades: proceeding would launch the worker straight
+# into the dialog this control exists to remove.
+test_kimi_trust_missing_node_is_refused() {
+  local rec store out rc bindir
+  rec=$(make_trust_case no-node)
+  read_trust_case "$rec"
+  store=$(trust_store "$TRUST_HOME")
+  bindir=$(node_free_path "$TRUST_CASE_DIR")
+  rc=0; out=$(PATH="$bindir" HOME="$TRUST_HOME" "$TRUST" "$TRUST_WT" "$TRUST_PROJ" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a missing node must refuse rather than degrade: $out"
+  assert_contains "$out" "node" "the refusal did not name the missing interpreter"
+  assert_kimi_not_trusted "$store" "$TRUST_WT" "a worktree was registered without an interpreter to write the store"
+  case "$out" in
+    *"trusted:"*) fail "a registration was claimed although none could be written: $out" ;;
+  esac
+  pass "fm-kimi-trust.sh: a missing node is refused rather than degraded"
+}
+
+# The seed is the whole security boundary for home-level trust: both seeded
+# shapes are trusted, and every path that is not a home seeded for THIS
+# secondmate is refused and left unregistered.
+test_kimi_trust_secondmate_home_modes() {
+  local rec store home target out rc
+  rec=$(make_trust_case secondmate)
+  read_trust_case "$rec"
+  store=$(trust_store "$TRUST_HOME")
+
+  home="$TRUST_CASE_DIR/sm-clone"
+  seed_secondmate_home "$home" clone-n1 clone
+  out=$(run_home_trust "$home" "$TRUST_HOME" clone-n1)
+  expect_code 0 $? "a standalone-clone secondmate home must be trusted: $out"
+  assert_kimi_trusted "$store" "$home" "the standalone-clone home was not registered"
+
+  home="$TRUST_CASE_DIR/sm-worktree"
+  seed_secondmate_home "$home" leased-n1 worktree
+  out=$(run_home_trust "$home" "$TRUST_HOME" leased-n1)
+  expect_code 0 $? "a leased-worktree secondmate home must be trusted: $out"
+  assert_kimi_trusted "$store" "$home" "the leased-worktree home was not registered"
+
+  target="$TRUST_CASE_DIR/plain"
+  mkdir -p "$target"
+  rc=0; out=$(run_home_trust "$target" "$TRUST_HOME" plain-n1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a plain directory must be refused"
+  assert_contains "$out" "no .fm-secondmate-home marker" "the refusal did not name the missing marker"
+  assert_kimi_not_trusted "$store" "$target" "a plain directory was registered"
+
+  target="$TRUST_CASE_DIR/other-mate"
+  seed_secondmate_home "$target" other-n1 clone
+  rc=0; out=$(run_home_trust "$target" "$TRUST_HOME" wanted-n1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a home marked for another secondmate must be refused"
+  assert_contains "$out" "other-n1" "the refusal did not name the id the home is marked for"
+  assert_kimi_not_trusted "$store" "$target" "a home marked for another secondmate was registered"
+
+  target="$TRUST_CASE_DIR/linked-marker"
+  seed_secondmate_home "$target" linked-n1 clone
+  rm -f "$target/.fm-secondmate-home"
+  printf 'linked-n1\n' > "$TRUST_CASE_DIR/planted-id"
+  ln -sf "$TRUST_CASE_DIR/planted-id" "$target/.fm-secondmate-home"
+  rc=0; out=$(run_home_trust "$target" "$TRUST_HOME" linked-n1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a symlinked marker must be refused"
+  assert_contains "$out" "symlink" "the refusal did not name the symlinked marker"
+  assert_kimi_not_trusted "$store" "$target" "a home whose marker is a symlink was registered"
+
+  target="$TRUST_CASE_DIR/escaping"
+  seed_secondmate_home "$target" escaping-n1 clone
+  rm -rf "$target/projects"
+  mkdir -p "$TRUST_CASE_DIR/elsewhere"
+  ln -s "$TRUST_CASE_DIR/elsewhere" "$target/projects"
+  rc=0; out=$(run_home_trust "$target" "$TRUST_HOME" escaping-n1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a home whose operational directory escapes it must be refused"
+  assert_contains "$out" "outside the home" "the refusal did not name the escaping directory"
+  assert_kimi_not_trusted "$store" "$target" "a home whose projects/ escapes it was registered"
+
+  target="$TRUST_CASE_DIR/user-home"
+  seed_secondmate_home "$target" userhome-n1 clone
+  rc=0; out=$(run_home_trust "$target" "$target" userhome-n1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the user's home directory must be refused"
+  assert_contains "$out" "home directory" "the refusal did not name the home directory"
+  assert_kimi_not_trusted "$store" "$target" "the user's home directory was registered"
+  out=$(run_home_trust "$target" "$TRUST_HOME" userhome-n1)
+  expect_code 0 $? "the same seeded home must be accepted once it is not HOME: $out"
+
+  # A secondmate home is not a linked worktree of the project, so worktree
+  # mode must keep refusing it rather than widening to cover the new case.
+  target="$TRUST_CASE_DIR/wrong-mode"
+  seed_secondmate_home "$target" mode-n1 clone
+  rc=0; out=$(run_trust "$TRUST_HOME" "$target" "$target") || rc=$?
+  [ "$rc" -ne 0 ] || fail "worktree mode must still refuse a standalone-clone home"
+  assert_contains "$out" "primary checkout" "the refusal did not name the primary checkout"
+  assert_kimi_not_trusted "$store" "$target" "worktree mode registered a standalone-clone home"
+
+  pass "fm-kimi-trust.sh: home-level trust covers both seeded shapes and refuses everything unseeded"
+}
+
+# The spawn half: a real fm-spawn of a kimi worker must pre-register the
+# worktree in the store the launching user's kimi reads, and a registration
+# that fails must refuse the spawn before any task state or launch exists,
+# because the captain chose pre-registration with no dialog-answer fallback.
+test_kimi_spawn_pretrusts_its_worktree() {
+  local id rec out store
+  id="kimi-trust-z1-$$"
+  rec=$(make_spawn_case pretrust "$id")
+  read_spawn_record "$rec"
+  store=$(trust_store "$HOME_DIR")
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  expect_code 0 $? "a kimi spawn into a fresh worktree should succeed"
+  assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
+  assert_kimi_trusted "$store" "$WT_DIR" "the kimi spawn did not pre-register trust for its worktree"
+  assert_grep "$FAKEBIN_DIR/kimi" "$CASE_DIR/launch.log" \
+    "the launch command was not sent after the registration"
+  pass "fm-spawn: a kimi spawn pre-registers its worktree before launching"
+}
+
+test_kimi_spawn_refused_when_trust_registration_fails() {
+  local id rec out rc store file
+  id="kimi-trust-z2-$$"
+  rec=$(make_spawn_case trust-refused "$id")
+  read_spawn_record "$rec"
+  store=$(trust_store "$HOME_DIR")
+  mkdir -p "$store"
+  file=$(kimi_record_path "$store" "$WT_DIR")
+  printf '%s' '{"root":"/somewhere/else","trustedAt":1}' > "$file"
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a spawn whose trust registration is refused must fail: $out"
+  assert_contains "$out" "Kimi workspace trust" "the spawn did not report the trust refusal"
+  assert_not_contains "$out" "spawned $id" "a refused registration still reported a successful spawn"
+  [ "$(cat "$file")" = '{"root":"/somewhere/else","trustedAt":1}' ] \
+    || fail "the refused spawn overwrote a record it does not own"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "a refused spawn launched the kimi worker anyway"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused spawn published task metadata"
+  [ ! -e "/tmp/fm-$id" ] || { rm -rf "/tmp/fm-$id"; fail "a refused spawn stranded a temp root no teardown can find"; }
+  pass "fm-spawn: a kimi spawn whose registration fails is refused before any launch or task state"
+}
+
+# The second directory a kimi launch starts in: a --secondmate spawn's home,
+# which 0.42.0 gates behind the same dialog a fresh worktree meets.
+test_kimi_secondmate_spawn_pretrusts_its_home() {
+  local case_dir primary home id fakebin out store
+  case_dir="$TMP_ROOT/sm-trust-spawn"
+  primary="$case_dir/primary"
+  home="$case_dir/fm-homes/nomistakes-k1"
+  id="kimi-sm-trust-z3-$$"
+  seed_secondmate_home "$home" "$id" clone
+  mkdir -p "$home/data/$id"
+  printf '%s\n' '# Charter' "## Captain's intent" 'Exercise secondmate dispatch.' > "$home/data/$id/brief.md"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mkdir -p "$primary/data" "$primary/projects" "$primary/state" "$primary/config"
+  touch "$primary/state/.last-watcher-beat"
+  printf 'kimi\n' > "$primary/config/crew-harness"
+  mkdir -p "$primary/data/$id"
+  printf '%s\n' '# Charter' "## Captain's intent" 'Exercise secondmate dispatch.' > "$primary/data/$id/brief.md"
+  : > "$case_dir/launch.log"
+  : > "$case_dir/pointer.log"
+  : > "$case_dir/kimi.state"
+  : > "$case_dir/tmux-calls.log"
+  store=$(trust_store "$primary")
+  out=$(HOME="$primary" FM_ROOT_OVERRIDE='' FM_HOME="$primary" \
+    FM_STATE_OVERRIDE="$primary/state" FM_DATA_OVERRIDE="$primary/data" \
+    FM_PROJECTS_OVERRIDE="$primary/projects" FM_CONFIG_OVERRIDE="$primary/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$home" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
+    FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
+    FM_FAKE_SWALLOWED="$case_dir/kimi.swallowed" \
+    FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
+    FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    PATH="$fakebin:$BASE_PATH" \
+    "$SPAWN" "$id" "$home" --harness kimi --secondmate 2>&1)
+  expect_code 0 $? "a kimi secondmate spawn into a seeded home should succeed: $out"
+  assert_contains "$out" "spawned $id harness=kimi" "kimi secondmate spawn did not report success"
+  assert_kimi_trusted "$store" "$home" "the kimi secondmate spawn did not pre-register trust for its home"
+  assert_not_contains "$out" "could not pre-register" "a seeded home failed trust pre-registration"
+  pass "fm-spawn: a kimi secondmate spawn pre-registers its home"
+}
+
 test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
@@ -1151,3 +1585,13 @@ test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
 test_watcher_never_classifies_kimi_from_its_spinner
 test_kimi_bordered_prompt_needs_no_override
+test_kimi_trust_writes_the_verified_store_record_shape
+test_kimi_trust_registers_the_logical_and_resolved_paths
+test_kimi_trust_refuses_out_of_scope_paths
+test_kimi_trust_scope_survives_hostile_caller_environment
+test_kimi_trust_refuses_a_foreign_record_under_the_same_name
+test_kimi_trust_missing_node_is_refused
+test_kimi_trust_secondmate_home_modes
+test_kimi_spawn_pretrusts_its_worktree
+test_kimi_spawn_refused_when_trust_registration_fails
+test_kimi_secondmate_spawn_pretrusts_its_home
