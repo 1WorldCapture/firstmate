@@ -1,6 +1,6 @@
 # Kimi Code
 
-Verified on 2026-09-17 with Kimi Code CLI 2.0.0; workspace-trust pre-registration verified 2026-09-14 on 0.42.0 (initial verification 2026-07-25 on 0.29.1).
+Verified on 2026-09-17 with Kimi Code CLI 2.0.0; workspace-trust pre-registration and herdr agent-plane brief delivery verified 2026-09-14 on 0.42.0 (initial verification 2026-07-25 on 0.29.1).
 
 ## Operating facts
 
@@ -17,7 +17,7 @@ Verified on 2026-09-17 with Kimi Code CLI 2.0.0; workspace-trust pre-registratio
 | Trust dialog | A fresh worktree shows `Trust this folder?` with `Trust this folder` pre-selected when the directory was not pre-registered. Every spawn pre-registers the directory first (see `Workspace trust` below), which removes the dialog; if it appears anyway, spawn reads the visible pane, recognizes the complete dialog (its title, both navigation-hint tokens `↑↓ navigate` and `Enter select` - matched separately so a hint wrapped in a narrow pane still counts - the selected `❯ Trust this folder`, and `Don't trust`), sends Enter on every poll the complete dialog is still there, and verifies that a later visible-pane capture no longer contains it before the ordinary readiness gate continues. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; identity comes from process ancestry command name `kimi`, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding. |
-| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
+| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text; 0.42.0 draws a two-row status footer (mode/model/path/hints, then right-aligned context usage) directly below the box with no blank separator, and the shared reader treats that named furniture as bounding the box. |
 | Effort | `kimi provider list --json` exposes per-model `supportEfforts` values `low`, `high`, and `max` plus a `defaultEffort`; the launch flag and mapping remain unverified, so spawn records and omits requested effort per `references/common/model-and-effort.md`. |
 
 ## Readiness-gated start
@@ -27,6 +27,8 @@ Every trust predicate reads `fm_backend_visible_capture` - the viewport with no 
 Any single marker of the dialog on that visible pane - `Trust this folder` or the negative `Don't trust` option - withholds the ready verdict, because a capture caught mid-redraw and a capture that has painted only the box title both miss the complete dialog while the banner above it would otherwise read as ready. The banner also prints before the dialog paints at all, which no single capture can distinguish from a ready pane, so the verdict additionally requires two consecutive captures that are each ready and free of dialog text; a capture that is not ready, and a blank one, restarts that count, which is what keeps the pre-banner boot captures and redraw frames from spending it.
 This launch-then-send shape is mandatory because Kimi rejects positional instructions as an unknown command.
 The path must be absolute because the instructions live outside the task worktree and Kimi reads them there without `--add-dir`.
+On herdr the pane plane never carries the pointer: readiness rides `herdr agent wait --until idle` and the pointer rides `herdr agent prompt --wait`, so a swallowed submission fails loudly instead of dropping the brief silently while the pane still looks healthy; `../../../docs/herdr-backend.md` under "Current transport behavior" owns that split and its bounded agent-registration retry.
+On herdr the composer verdict also depends on bounding the box at Kimi's status footer, because the cursorless reader rejects a box whose next row is unrecognized non-blank content and 0.42.0 always draws that footer directly below the box.
 
 Sending before readiness was reproduced as a silent drop with zero exit status, an empty composer, `context: 0%`, no echoed user message, and a healthy-looking idle pane.
 The startup input-readiness window is the established cause; the banner is not.
