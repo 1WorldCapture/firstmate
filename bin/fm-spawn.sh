@@ -285,6 +285,9 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
+# Kimi 0.42.0 also gates a directory it has never seen behind a folder-trust
+# dialog, so every kimi launch pre-registers the directory the pane starts in
+# through bin/fm-kimi-trust.sh; a failed registration refuses the spawn.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
@@ -312,15 +315,20 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# claude is the one harness whose pre-launch setup can REFUSE the spawn: before
-# any per-task state exists, and before its worktree .claude/settings.local.json
-# hooks are written, every claude launch pre-registers the directory the pane
-# starts in - the task worktree, or the secondmate home for a --secondmate spawn -
-# in the launching user's own Claude trust store through bin/fm-claude-trust.sh,
-# because Claude's interactive workspace-trust dialog gates a folder it has never
-# seen and firstmate cannot answer it. That helper's header owns the structural
-# scope test for both shapes and every refusal; a failed registration stops this
-# spawn rather than launching a worker that would wedge on the dialog.
+# claude and kimi are the two harnesses whose pre-launch setup can REFUSE the
+# spawn: before any per-task state exists, and before its worktree
+# .claude/settings.local.json hooks are written, every claude launch
+# pre-registers the directory the pane starts in - the task worktree, or the
+# secondmate home for a --secondmate spawn - in the launching user's own
+# Claude trust store through bin/fm-claude-trust.sh, because Claude's
+# interactive workspace-trust dialog gates a folder it has never seen and
+# firstmate cannot answer it. That helper's header owns the structural scope
+# test for both shapes and every refusal; a failed registration stops this
+# spawn rather than launching a worker that would wedge on the dialog. Every
+# kimi launch pre-registers the same two directory shapes through
+# bin/fm-kimi-trust.sh for the same reason - Kimi 0.42.0's own folder-trust
+# dialog - with the same fatal failure, since kimi is also an allowed
+# secondmate harness.
 # Every claude launch also carries the attribution-off policy in its per-launch
 # --settings JSON, so a spawned worker never writes a Co-Authored-By trailer,
 # Claude-Session link, or generated-with line into a commit or PR body;
@@ -3390,6 +3398,14 @@ fi
 # path that was not pre-registered, refuses to count a busy turn as ready until
 # it has done so. agy is crewmate/scout only (refused above for secondmate), so
 # only the worktree shape applies.
+# kimi gates a fresh directory behind its own "Trust this folder?" dialog as
+# of 0.42.0 (bin/fm-kimi-trust.sh owns the store shape, the idempotent skip,
+# and the scope tests for both shapes), and the captain explicitly chose
+# pre-registration as the only control with no post-launch dialog detection
+# or Enter-answering fallback, so a failed registration is fatal like
+# claude's rather than warning like agy's: with no backstop, launching would
+# only move the failure to a wedged pane. kimi is an allowed secondmate
+# harness too, so the secondmate-home shape applies alongside the worktree.
 AGY_TRUST_PREREGISTERED=0
 case "$HARNESS" in
   claude*)
@@ -3410,6 +3426,22 @@ case "$HARNESS" in
       else
         echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
       fi
+    fi
+    ;;
+  kimi)
+    # Kimi 0.42.0 gates a fresh directory behind its own folder-trust dialog,
+    # and the captain explicitly chose pre-registration as the only control
+    # with no post-launch dialog detection or Enter-answering fallback, so a
+    # failed registration is fatal exactly like claude's: there is no
+    # backstop this launch could fall back to instead of wedging.
+    if [ "$KIND" = secondmate ]; then
+      spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+    else
+      spawn_trust_args=("$WT" "$PROJ_ABS")
+    fi
+    if ! "$FM_ROOT/bin/fm-kimi-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+      echo "error: could not pre-register Kimi workspace trust for $WT; refusing to launch a kimi worker that would wedge on the trust dialog; inspect window $T" >&2
+      exit 1
     fi
     ;;
 esac
