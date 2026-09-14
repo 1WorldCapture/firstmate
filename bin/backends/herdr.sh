@@ -3705,6 +3705,88 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
   fi
 }
 
+# fm_backend_herdr_wait_agent_idle: block until <target>'s pane reports a
+# native agent_status of idle through herdr's agent plane (`agent wait
+# --until idle`), bounded by <timeout-ms> for the wait itself. One call does
+# NOT cover a fresh launch: `agent wait` FAILS FAST with agent_not_found
+# while the agent process is still registering (verified live on herdr
+# 0.9.0: rc=1 immediately, it does not wait for registration), so the
+# not-found race is retried a bounded number of times before giving up.
+# Echoes `idle` and returns 0 on success; echoes `not-found` (the
+# registration race outlasted the retries) or `wait-expired` (a legible
+# agent never reached idle within the budget, which also covers any other
+# non-not-found CLI failure) and returns 1, replaying the CLI's last error
+# line to stderr for the caller's diagnostics.
+# FM_BACKEND_HERDR_AGENT_REGISTER_RETRIES (default 50) and
+# FM_BACKEND_HERDR_AGENT_REGISTER_SLEEP (default 0.2) bound the
+# registration-race loop; the observed not-found window on a fresh kimi
+# launch is well under a second, so ~10s at the defaults is generous.
+FM_BACKEND_HERDR_AGENT_REGISTER_RETRIES=${FM_BACKEND_HERDR_AGENT_REGISTER_RETRIES:-50}
+FM_BACKEND_HERDR_AGENT_REGISTER_SLEEP=${FM_BACKEND_HERDR_AGENT_REGISTER_SLEEP:-0.2}
+
+fm_backend_herdr_wait_agent_idle() {  # <target> <timeout-ms>
+  local target=$1 timeout_ms=$2 attempt=0 out rc
+  fm_backend_herdr_parse_target "$target" || { printf 'error'; return 1; }
+  while :; do
+    out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" \
+      agent wait "$FM_BACKEND_HERDR_PANE" --until idle --timeout "$timeout_ms" 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      printf 'idle'
+      return 0
+    fi
+    case "$out" in
+      *agent_not_found*)
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge "$FM_BACKEND_HERDR_AGENT_REGISTER_RETRIES" ]; then
+          printf 'not-found'
+          return 1
+        fi
+        sleep "$FM_BACKEND_HERDR_AGENT_REGISTER_SLEEP"
+        ;;
+      *)
+        printf 'wait-expired'
+        printf '%s\n' "$out" | tail -n 1 >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
+# fm_backend_herdr_agent_prompt: deliver <text> to <target>'s pane through
+# herdr's agent prompt plane (`agent prompt --wait --until working`), which
+# submits the text itself and blocks until the agent is observed WORKING, so
+# a submission the agent swallowed surfaces as a loud CLI failure
+# (`agent_prompt_stalled`, documented in `herdr agent prompt --help`) rather
+# than a silently dropped pointer. Verified live on herdr 0.9.0 with a kimi
+# 0.42.0 launch: a prompt fired at the first post-startup idle returns
+# rc=0 with agent_status=working in about a second. Echoes `prompted` and
+# returns 0 when working was observed; echoes the CLI's error code (or
+# `error` when none is legible) and returns 1 otherwise, replaying the
+# CLI's last error line to stderr.
+fm_backend_herdr_agent_prompt() {  # <target> <text> <timeout-ms>
+  local target=$1 text=$2 timeout_ms=$3 out rc code
+  fm_backend_herdr_parse_target "$target" || { printf 'error'; return 1; }
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" \
+    agent prompt "$FM_BACKEND_HERDR_PANE" "$text" --wait --until working --timeout "$timeout_ms" 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf 'prompted'
+    return 0
+  fi
+  case "$out" in
+    *agent_prompt_stalled*) code=agent_prompt_stalled ;;
+    *agent_not_found*) code=agent_not_found ;;
+    *)
+      code=$(printf '%s\n' "$out" | jq -r '.error.code // empty' 2>/dev/null | tail -n 1)
+      [ -n "$code" ] || code=error
+      ;;
+  esac
+  printf '%s' "$code"
+  printf '%s\n' "$out" | tail -n 1 >&2
+  return 1
+}
+
 # fm_backend_herdr_pane_for_tab: the root pane id for <tab_id> in <workspace_id>
 # of <session>, via one pane list call filtered by tab_id (never assumes a
 # tab-number/pane-number correspondence - herdr numbers them independently).

@@ -702,6 +702,7 @@ ok - live composer-matrix guard verified 8 live surface(s)
 All six installed harnesses' real idle composers reached a proven `empty` (Claude auto-updated to 2.1.227 between the audit and this rerun, so the shipped classifier is proven against the newer release as well), including Pi through the tmux foreground-process identity probe, Grok through the titled-bottom-border tolerance, and OpenCode through the left-bar shape; Codex and OpenCode first parked on vendor update-available modals that the strict classifier correctly refused until the guard's single non-submitting Escape dismissed them.
 The strict blank-row posture held live (a blank shell row deferred injection), and a zellij pane changing for reasons unrelated to submission never confirmed a delivery, replacing the retired content-diff heuristic's false positive.
 Kimi was not installed on the verification machine; its bordered shape is pinned by the portable byte-capture regressions in `tests/fm-composer-lib.test.sh`, which also carry the other five adapters' capability profiles for every harness under both a UTF-8 locale and `LC_ALL=C`.
+A real Kimi Code CLI 0.42.0 idle capture under Herdr 0.9.0 exists from 2026-09-14 and is recorded under the [Herdr](#herdr) section's "Kimi agent-plane brief delivery"; the tmux cursor-anchored half of the kimi matrix is still owed a live refresh on a machine with kimi installed.
 This guard is the refresh command after an upgrade to any matrix-covered harness; rerun it and update the versions above rather than trusting this table across releases.
 The 2026-08-23 steering-inbox doorbell run observed grok 1.0.5's idle composer classifying `unknown` (and sometimes pending-family), never `empty`.
 Issue #3436's recorded idle capture reproduced the cause on 2026-09-14: Grok 1.0.5 renders the titled bottom border three columns wider than its aligned top and content rows, so the cursorless Herdr profile rejected the otherwise complete box as ambiguous.
@@ -1151,6 +1152,41 @@ Observed 2026-08-19:
 ```text
 ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8.0 reports empty for a landed idle steer
 ```
+
+### Kimi agent-plane brief delivery
+
+Measured 2026-09-14 on macOS aarch64 (Darwin 25.5.0) with Kimi Code CLI 0.42.0 and Herdr 0.9.0 in an isolated `fm-lab-` session, with the host's Kimi integration hook still at v6 while the current hook generation is v7 (`herdr integration status`), deliberately not upgraded for the measurement.
+The v6 hook proved sufficient for everything the spawn path reads: a fresh kimi launch reports `agent_not_found` briefly, then `unknown`, then `idle` about four seconds after launch, and `agent prompt --wait` observes `working` within about a second of the submit.
+What v6 does not provide is a reliable post-turn idle: a completed turn reports `done`, a settled pane reaches `idle` only later (the final run reached it by the sixth poll), and one earlier probe saw a post-turn `agent wait --until idle` time out, so nothing in the spawn path waits on a post-turn idle.
+
+The agent-plane primitives, probed directly before the spawn:
+
+```sh
+herdr agent wait <pane> --until idle --timeout 5000   # before registration: rc=1 at once, agent_not_found (fail-fast)
+herdr agent get <pane>                                # fresh launch: not-found -> unknown -> idle at ~4s
+herdr agent prompt <pane> "<text>" --wait --until working --timeout 60000   # rc=0, agent_status=working, ~1s
+```
+
+`agent wait` does not wait out the registration race itself - it fails fast with `agent_not_found` - which is why `bin/backends/herdr.sh` retries that error through a bounded registration window before reporting a readiness failure.
+
+The end-to-end spawn then ran the real `bin/fm-spawn.sh <id> <project> --harness kimi --backend herdr --mode direct-PR --yolo off` inside the guarded lab session (`bin/fm-herdr-lab.sh`), against a throwaway `FM_HOME` holding only the brief and a leased project worktree, with the delivery poll defaults unchanged and the real `HOME` retained because Herdr derives a named session's socket under `$HOME/.config/herdr`:
+
+```text
+== SPAWN RC: 0
+spawned kimi-herdr-live-z9 harness=kimi kind=ship mode=direct-PR yolo=off window=fm-lab-kimi-herdr-agent-38517-18142:w1:p2 worktree=/Users/lyon/.treehouse/project-acf3a6/1/project
+== META:
+window=fm-lab-kimi-herdr-agent-38517-18142:w1:p2
+worktree=/Users/lyon/.treehouse/project-acf3a6/1/project
+harness=kimi
+backend=herdr
+herdr_pane_id=w1:p2
+== WAITING FOR THE WORKER'S TURN TO END (agent status):
+  [1] working
+  [6] idle
+```
+
+The pane capture showed the pre-launch shell steps on the pane plane, the `✨ Read the brief at <absolute-path> and follow it exactly.` echo, `● Used Read (<brief>) · 14 lines`, the worker's `● READY` reply, and below the empty composer box the two-row status footer whose mode row and right-aligned `context: 3% (23k/1M)` row are the furniture that bounds the box on a cursorless capture.
+That footer shape is pinned by the portable matrix in `tests/fm-composer-lib.test.sh` (`test_matrix_kimi_status_footer_bounds_box`, asserted under a UTF-8 locale and `LC_ALL=C`), and the delivery-path regressions live in the herdr half of `tests/fm-kimi-harness.test.sh`.
 
 ### Prune and respawn
 
