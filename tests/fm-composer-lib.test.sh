@@ -744,6 +744,52 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
 }
 
+test_matrix_kimi_status_footer_bounds_box() {
+  # Kimi 0.42 draws a two-row status footer DIRECTLY below its composer box
+  # with no blank separator: the mode/model/path/hint row, then the
+  # right-aligned context-usage row. Captured live on Kimi Code CLI 0.42.0
+  # under Herdr 0.9.0 (pane read, ANSI and plain alike). Without the furniture
+  # rule the cursorless box boundary rejects the box and every Kimi 0.42
+  # screen reads `unknown` on a cursorless backend, so kimi brief delivery can
+  # never confirm - measured live as a spawn that delivered the pointer,
+  # printed its echo, and still failed its confirmation window after 120s. A
+  # cursor-anchored backend never consults that boundary.
+  local mode_row context_row idle delivered typed ordinary
+  mode_row=$'Never Ask  K3 thinking: high  …/project-acf3a6/1/project    ctrl+o expand | ! to run a shell command'
+  context_row=$'                                        context: 3% (23k/1M)'
+  idle=$'Welcome to Kimi Code!\n\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'"$mode_row"$'\n'"$context_row"
+  delivered=$' ✨ Read the brief at /tmp/home/data/t/launch-brief.md and follow it exactly.\n\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'"$mode_row"$'\n'"$context_row"
+  typed=$'╭────────────────────────────────╮\n│ > Read the brief and follow it │\n╰────────────────────────────────╯\n'"$mode_row"$'\n'"$context_row"
+  ordinary=$'╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nsome ordinary wrapped transcript text'
+  # Non-vacuousness: the footer rows are real non-blank edge-free rows that
+  # the cursorless boundary below a box would otherwise disqualify it for.
+  _fm_composer_row_is_kimi_status "$mode_row" \
+    || fail "Kimi's mode/model/hint footer row must be recognized as furniture"
+  _fm_composer_row_is_kimi_status "$context_row" \
+    || fail "Kimi's context-usage footer row must be recognized as furniture"
+  _fm_composer_row_is_kimi_status 'fix the flaky test' \
+    && fail "ordinary typed text must not be mistaken for Kimi status furniture"
+  _fm_composer_row_is_kimi_status 'thinking about the fix before pushing' \
+    && fail "prose containing 'thinking' must not be mistaken for the effort cell"
+  _fm_composer_row_is_kimi_status 'I was thinking: hard about the deadline' \
+    && fail "single-spaced prose after 'thinking:' must not match the cell separator"
+  _fm_composer_row_is_kimi_status 'press ctrl+o expand for the picker' \
+    && fail "the hint cluster without its pipe-bang tail must not match"
+  _fm_composer_row_is_kimi_status 'the context: three percent (of the budget)' \
+    && fail "a spelled-out context percentage must not match the usage cell"
+  assert_screen "idle kimi footer-below-box on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "idle kimi footer-below-box on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "idle kimi footer-below-box on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "idle kimi footer-below-box on tmux (cursor in box)" empty "$CAPS_TMUX" "$idle" 3
+  assert_screen "delivered kimi screen still reads an empty composer" empty "$CAPS_STYLED" "$delivered"
+  assert_screen "typed kimi draft stays pending" pending "$CAPS_STYLED" "$typed"
+  # The exception stays box-only and signature-bound: any other non-blank
+  # edge-free row directly below a box still disqualifies it.
+  assert_screen "ordinary text below the box still rejects on herdr" unknown "$CAPS_STYLED" "$ordinary"
+  assert_screen "ordinary text below the box still rejects on plain captures" unknown "$CAPS_PLAIN" "$ordinary"
+  pass "matrix: Kimi's status footer bounds its composer box on cursorless backends"
+}
+
 test_matrix_claude_inside_zellij_ansi_dump() {
   # Real claude captured through `zellij action dump-screen --ansi`
   # (capability established by the audit): `ESC[m` `❯` U+00A0.
@@ -983,6 +1029,7 @@ test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
+test_matrix_kimi_status_footer_bounds_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies

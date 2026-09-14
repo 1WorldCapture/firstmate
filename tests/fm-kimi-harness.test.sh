@@ -44,10 +44,14 @@ make_spawn_fakebin() {
 set -u
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
 state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
+# Real Kimi 0.42 draws its two-row status footer directly below the composer
+# box; on the cursorless herdr path that footer is what bounds the box, so a
+# simpler box-last screen here would hide the exact regression this fake must
+# catch.
 fake_screen() {
   case "$state" in
     ready)
-      printf 'Welcome to Kimi Code!\ncontext: 0%% (0/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
+      printf 'Welcome to Kimi Code!\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K3 thinking: high  …/project    ctrl+o expand | ! to run a shell command\n                                context: 0%% (0/256k)\n'
       ;;
     trust)
       printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate · Enter select · Esc exit │\n│ %s │\n│ ❯ Trust this folder │\n│   Don'"'"'t trust │\n╰──────────────────────────────╯\n' "$FM_FAKE_PANE_PATH"
@@ -70,10 +74,10 @@ fake_screen() {
       printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate ·        │\n│ Enter select · Esc   │\n│ exit                 │\n│ %s │\n│ ❯ Trust this folder  │\n│   Don'"'"'t trust         │\n╰──────────────────────╯\n' "$FM_FAKE_PANE_PATH"
       ;;
     pointer-typed)
-      printf 'context: 0%% (0/256k)\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
+      printf '╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\nNever Ask  K3 thinking: high  …/project    ctrl+o expand | ! to run a shell command\n                                context: 0%% (0/256k)\n'
       ;;
     delivered)
-      printf '✨ Read the brief at %s and follow it exactly.\ncontext: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n' "$FM_FAKE_BRIEF_REAL"
+      printf '✨ Read the brief at %s and follow it exactly.\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K3 thinking: high  …/project    ctrl+o expand | ! to run a shell command\n                                context: 1%% (2k/256k)\n' "$FM_FAKE_BRIEF_REAL"
       ;;
     *)
       printf 'shell starting\n$ \n'
@@ -88,8 +92,8 @@ fake_history() {
 }
 fake_cursor_y() {
   case "$state" in
-    pointer-typed) printf '3\n' ;;
-    ready|delivered) printf '3\n' ;;
+    pointer-typed) printf '2\n' ;;
+    ready|delivered) printf '2\n' ;;
     *) printf '1\n' ;;
   esac
 }
@@ -279,6 +283,297 @@ read_spawn_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
 $1
 EOF
+}
+
+# make_spawn_herdr_fakebin: the herdr twin of the tmux fake above, backing the
+# kimi-on-herdr agent-plane delivery tests. One STATEFUL `herdr` stub (JSON
+# state in $FM_FAKE_HERDR_STATE, mutated with real jq) models the
+# workspace/tab lifecycle exactly like tests/fm-backend-herdr.test.sh's
+# make_herdr_statefake (same verified real-herdr facts; see that builder's
+# header), while the pane and agent planes drive the SAME four-state kimi
+# screen machine the tmux fake uses (launched -> ready -> pointer-typed ->
+# delivered), so both backends are asserted against identical observable
+# behavior:
+#   pane run        logs its line to $FM_FAKE_HERDR_RUN_LOG (treehouse get,
+#                   the GOTMPDIR/FM_TASK_ID exports);
+#   pane send-text  a staged ". '<file>'" source line resolves to the staged
+#                   launch file's contents first (fm-spawn stages the launch
+#                   command and types only that short line); a *' --auto' line
+#                   is the kimi launch (logged to $FM_FAKE_LAUNCH_LOG, state
+#                   -> launched); any other text is a pane-plane pointer
+#                   attempt (logged to $FM_FAKE_HERDR_PANE_POINTER_LOG, state
+#                   -> pointer-typed), which the agent-plane path must never
+#                   produce;
+#   pane send-keys  Enter advances launched -> ready (unless
+#                   FM_FAKE_KIMI_READY=no) and pointer-typed -> delivered
+#                   (unless FM_FAKE_KIMI_DELIVERY=no), like the tmux fake;
+#   pane read       the state's screen, plain and --format ansi alike;
+#   pane get        foreground_cwd from $FM_FAKE_PANE_PATH, or pane_not_found
+#                   for a pane no tab owns;
+#   agent get       the state's agent status - idle once ready, done once
+#                   delivered, agent_not_found before registration;
+#   agent wait      rc 0 idle once the state is ready or later, rc 1
+#                   agent_not_found while unregistered (the verified
+#                   fail-fast registration race), with the first
+#                   FM_FAKE_HERDR_AGENT_WAIT_IDLE_AFTER calls refused even
+#                   once the screen looks ready, counted in the state file;
+#   agent prompt    rc 0 agent_prompted with the agent observed working,
+#                   appending the text to $FM_FAKE_POINTER_LOG (the delivery
+#                   plane under test) and advancing state -> delivered (or
+#                   back to ready's idle+empty screen when
+#                   FM_FAKE_KIMI_DELIVERY=no, the shape that used to
+#                   false-confirm the pane-plane submit core), or rc 1
+#                   agent_prompt_stalled when FM_FAKE_HERDR_AGENT_PROMPT_STALL=1.
+# Every call is logged to $FM_HERDR_LOG in the same unit-separated form the
+# backend tests use, so the ordering between the agent wait and the agent
+# prompt is assertable.
+make_spawn_herdr_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_HERDR_LOG:?}"
+STATE="${FM_FAKE_HERDR_STATE:?}"
+{
+  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+
+jq_state() { jq "$@" "$STATE"; }
+save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
+
+state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
+# Real Kimi 0.42 draws its two-row status footer directly below the composer
+# box; on the cursorless herdr path that footer is what bounds the box, so a
+# simpler box-last screen here would hide the exact regression this fake must
+# catch.
+fake_screen() {
+  case "$state" in
+    ready)
+      printf 'Welcome to Kimi Code!\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K3 thinking: high  …/project    ctrl+o expand | ! to run a shell command\n                                context: 0%% (0/256k)\n'
+      ;;
+    pointer-typed)
+      printf '╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\nNever Ask  K3 thinking: high  …/project    ctrl+o expand | ! to run a shell command\n                                context: 0%% (0/256k)\n'
+      ;;
+    delivered)
+      printf '✨ Read the brief at %s and follow it exactly.\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K3 thinking: high  …/project    ctrl+o expand | ! to run a shell command\n                                context: 1%% (2k/256k)\n' "$FM_FAKE_BRIEF_REAL"
+      ;;
+    *)
+      printf 'shell starting\n$ \n'
+      ;;
+  esac
+}
+
+cmd=${1:-}; sub=${2:-}
+ws=""; label=""
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --workspace) ws=${args[$((i+1))]:-} ;;
+    --label) label=${args[$((i+1))]:-} ;;
+  esac
+done
+
+case "$cmd $sub" in
+  "status --json")
+    printf '{"client":{"version":"0.9.0","protocol":14},"server":{"running":true}}\n'
+    ;;
+  "terminal title")
+    printf '{"result":{"reason":"no_foreground_client"}}\n'
+    ;;
+  "workspace list")
+    jq_state '{result:{workspaces:.workspaces}}'
+    ;;
+  "workspace create")
+    n=$(jq_state -r '.next'); wsid="w$n"; dn=$((n + 1))
+    jq_state --arg wsid "$wsid" --arg wlabel "$label" \
+      --arg tabid "$wsid:t$dn" --arg paneid "$wsid:p$dn" \
+      '.workspaces += [{workspace_id:$wsid, label:$wlabel}]
+       | .tabs += [{tab_id:$tabid, label:"1", workspace_id:$wsid, pane_id:$paneid}]
+       | .next = (.next + 2)' | save
+    printf '{"result":{"workspace":{"workspace_id":"%s","label":"%s"},"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' \
+      "$wsid" "$label" "$wsid:t$dn" "$wsid:p$dn"
+    ;;
+  "tab list")
+    jq_state --arg w "$ws" '{result:{tabs:[.tabs[]|select(.workspace_id==$w)]}}'
+    ;;
+  "tab create")
+    n=$(jq_state -r '.next'); tabid="$ws:t$n"; paneid="$ws:p$n"
+    jq_state --arg w "$ws" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" \
+      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid}]
+       | .next = (.next + 1)' | save
+    printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tabid" "$paneid"
+    ;;
+  "pane list")
+    jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
+    ;;
+  "pane close")
+    pane=${3:-}
+    jq_state --arg p "$pane" '.tabs |= [.[]|select(.pane_id != $p)]' | save
+    ;;
+  "tab close")
+    tab=${3:-}
+    jq_state --arg t "$tab" '.tabs |= [.[]|select(.tab_id != $t)]' | save
+    ;;
+  "pane get")
+    pane=${3:-}
+    if [ "$(jq_state --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" -ge 1 ]; then
+      jq -n --arg p "$pane" --arg fg "${FM_FAKE_PANE_PATH:-$PWD}" \
+        '{result:{pane:{pane_id:$p,foreground_cwd:$fg}}}'
+    else
+      printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$pane" >&2
+      exit 1
+    fi
+    ;;
+  "pane read")
+    fake_screen
+    ;;
+  "pane run")
+    printf '%s\n' "${4:-}" >> "$FM_FAKE_HERDR_RUN_LOG"
+    ;;
+  "pane send-text")
+    text=${4:-}
+    case "$text" in
+      ". '"*"'") staged=${text#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || text=$(cat "$staged") ;;
+    esac
+    case "$text" in
+      *' --auto')
+        printf '%s\n' "$text" >> "$FM_FAKE_LAUNCH_LOG"
+        printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
+        ;;
+      *)
+        printf '%s\n' "$text" >> "$FM_FAKE_HERDR_PANE_POINTER_LOG"
+        printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE"
+        ;;
+    esac
+    ;;
+  "pane send-keys")
+    case "${4:-}" in
+      enter|Enter)
+        case "$state" in
+          launched)
+            [ "${FM_FAKE_KIMI_READY:-yes}" = yes ] && printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+            ;;
+          pointer-typed)
+            [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ] && printf 'delivered\n' > "$FM_FAKE_KIMI_STATE"
+            ;;
+        esac
+        ;;
+    esac
+    ;;
+  "agent get")
+    case "$state" in
+      ready|pointer-typed) printf '{"result":{"agent":{"agent_status":"idle"}}}\n' ;;
+      delivered) printf '{"result":{"agent":{"agent_status":"done"}}}\n' ;;
+      *) printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "${3:-}" ;;
+    esac
+    ;;
+  "agent wait")
+    case "$state" in
+      ready|pointer-typed|delivered) : ;;
+      *)
+        printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "${3:-}" >&2
+        exit 1
+        ;;
+    esac
+    calls=$(( $(jq_state -r '.agent_wait_calls // 0') + 1 ))
+    jq_state --argjson c "$calls" '.agent_wait_calls = $c' | save
+    if [ "$calls" -le "${FM_FAKE_HERDR_AGENT_WAIT_IDLE_AFTER:-0}" ]; then
+      printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "${3:-}" >&2
+      exit 1
+    fi
+    printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+    ;;
+  "agent prompt")
+    if [ "${FM_FAKE_HERDR_AGENT_PROMPT_STALL:-0}" = 1 ]; then
+      printf '{"error":{"code":"agent_prompt_stalled","message":"agent target %s never reached working after the prompt"}}\n' "${3:-}" >&2
+      exit 1
+    fi
+    printf '%s\n' "${4:-}" >> "$FM_FAKE_POINTER_LOG"
+    if [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then
+      printf 'delivered\n' > "$FM_FAKE_KIMI_STATE"
+    else
+      printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+    fi
+    printf '{"result":{"type":"agent_prompted","agent":{"agent_status":"working"},"screen_detection_skipped":true}}\n'
+    ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
+  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_fake_exit0 "$fakebin" kimi
+  ln -s "$JQ_BIN" "$fakebin/jq"
+  printf '%s\n' "$fakebin"
+}
+
+# make_spawn_herdr_case: the herdr counterpart of make_spawn_case - the same
+# fixture home, project, worktree, and brief, but a herdr fakebin, herdr's
+# presentation projection disabled (the flat container/tab path is the surface
+# under test), and the herdr-side log/state files the fake writes.
+make_spawn_herdr_case() {
+  local name=$1 id=$2 case_dir home proj wt fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(make_spawn_herdr_fakebin "$case_dir/fake")
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$home/.kimi-code"
+  printf '# Kimi test config\ndefault_model = "test"\n' > "$home/.kimi-code/config.toml"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise Kimi dispatch on herdr.
+
+## Firstmate spec
+Verify agent-plane launch and delivery behavior.
+EOF
+  printf 'kimi\n' > "$home/config/crew-harness"
+  printf 'off\n' > "$home/config/herdr-presentation-spaces"
+  fm_git_worktree "$proj" "$wt" "wt-$name"
+  touch "$home/state/.last-watcher-beat"
+  : > "$case_dir/launch.log"
+  : > "$case_dir/pointer.log"
+  : > "$case_dir/pane-pointer.log"
+  : > "$case_dir/herdr-run.log"
+  : > "$case_dir/kimi.state"
+  : > "$case_dir/herdr-calls.log"
+  printf '{"next":1,"workspaces":[],"tabs":[]}\n' > "$case_dir/herdr-state.json"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+}
+
+# run_spawn_herdr: drive the real fm-spawn against the herdr fake world - no
+# $TMUX (this spawn is not inside tmux), an explicit non-default HERDR_SESSION
+# so a developer's ambient herdr state can never be consulted, and the fast
+# poll knobs the tmux runner uses. The HERDR_* launcher injections are cleared
+# too: this suite itself often runs inside a real herdr pane (the kimi
+# development worker's own home), and an inherited HERDR_PANE_ID would make
+# the spawn's launcher-identity check bind to that real pane instead of taking
+# the per-home container path the tests exercise.
+run_spawn_herdr() {
+  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
+  shift 6
+  HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX='' \
+    HERDR_ENV='' HERDR_PANE_ID='' HERDR_TAB_ID='' HERDR_WORKSPACE_ID='' HERDR_SOCKET_PATH='' \
+    FM_HERDR_LOG="$case_dir/herdr-calls.log" \
+    FM_FAKE_HERDR_STATE="$case_dir/herdr-state.json" \
+    FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
+    FM_FAKE_HERDR_PANE_POINTER_LOG="$case_dir/pane-pointer.log" \
+    FM_FAKE_HERDR_RUN_LOG="$case_dir/herdr-run.log" \
+    FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
+    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
+    FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    FM_BACKEND_HERDR_AGENT_REGISTER_SLEEP=0 \
+    HERDR_SESSION=fmtest \
+    PATH="$fakebin:$BASE_PATH" \
+    "$SPAWN" "$id" "$proj" --harness kimi --backend herdr --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 # --- workspace-trust pre-registration ----------------------------------------
@@ -1062,6 +1357,109 @@ test_kimi_trust_detection_requires_the_complete_dialog() {
   pass "fm-spawn: Kimi trust detection requires every observed dialog signal"
 }
 
+# --- kimi on herdr: agent-plane brief delivery --------------------------------
+#
+# herdr's pane plane can swallow input inside kimi's startup window while the
+# cursorless composer classifier already reads ready, and the pane-plane
+# submit core treats idle-plus-empty as landed. These drive the real fm-spawn
+# against the stateful herdr fake to pin the agent-plane contract: readiness
+# is a bounded agent-idle wait that rides out the registration race, the
+# pointer rides an agent prompt, and every failure mode stays loud.
+
+test_kimi_herdr_delivers_pointer_through_the_agent_plane() {
+  local id rec out rc launch pointer brief_real meta wait_line prompt_line
+  id=kimi-herdr-ok-z4
+  rec=$(make_spawn_herdr_case herdr-ok "$id")
+  read_spawn_record "$rec"
+  out=$(FM_FAKE_HERDR_AGENT_WAIT_IDLE_AFTER=1 run_spawn_herdr \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model kimi-code/k3 --effort high)
+  rc=$?
+  expect_code 0 "$rc" "a kimi spawn on herdr should deliver its brief through the agent plane: $out"
+  assert_contains "$out" "spawned $id harness=kimi" "herdr kimi spawn did not report success"
+
+  launch=$(cat "$CASE_DIR/launch.log")
+  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$HOME_DIR" "$id")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+    || fail "herdr kimi launch did not use the absolute binary, model, and --auto only: $launch"
+
+  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/launch-brief.md"
+  pointer=$(cat "$CASE_DIR/pointer.log")
+  [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
+    || fail "the herdr agent prompt did not deliver the exact pointer: $pointer"
+  [ ! -s "$CASE_DIR/pane-pointer.log" ] \
+    || fail "the pointer reached the pane plane on herdr: $(cat "$CASE_DIR/pane-pointer.log")"
+
+  wait_line=$(grep -n "$(printf 'agent\x1fwait')" "$CASE_DIR/herdr-calls.log" | head -1 | cut -d: -f1)
+  prompt_line=$(grep -n "$(printf 'agent\x1fprompt')" "$CASE_DIR/herdr-calls.log" | head -1 | cut -d: -f1)
+  [ -n "$wait_line" ] && [ -n "$prompt_line" ] && [ "$wait_line" -lt "$prompt_line" ] \
+    || fail "the agent-plane readiness wait must precede the agent prompt (wait line $wait_line, prompt line $prompt_line)"
+
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep 'backend=herdr' "$meta" "herdr kimi spawn did not record its backend"
+  assert_grep 'model=kimi-code/k3' "$meta" "herdr kimi meta lost the requested model"
+  assert_grep "export GOTMPDIR=" "$CASE_DIR/herdr-run.log" \
+    "herdr kimi spawn did not export its Go temp directory into the pane"
+  assert_grep "export FM_TASK_ID=$id" "$CASE_DIR/herdr-run.log" \
+    "herdr kimi spawn did not mark the pane with its task id"
+  pass "fm-spawn on herdr: kimi readiness waits on the agent plane and delivers the pointer through an agent prompt"
+}
+
+test_kimi_herdr_idle_empty_composer_does_not_false_confirm_delivery() {
+  local id rec out rc
+  id=kimi-herdr-idle-z5
+  rec=$(make_spawn_herdr_case herdr-idle "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn_herdr \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "an idle kimi with an empty composer after an accepted prompt must not be confirmed on herdr"
+  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+    "the idle-plus-empty herdr shape lacked a loud delivery diagnostic"
+  assert_grep 'failed: kimi brief pointer delivery was not confirmed' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
+    "the idle-plus-empty herdr shape did not leave a supervisor-visible failure"
+  [ -s "$CASE_DIR/pointer.log" ] \
+    || fail "the agent prompt should have accepted the pointer before the unconfirmed delivery"
+  pass "fm-spawn on herdr: an idle agent with an empty composer is no longer false-confirmed as delivered"
+}
+
+test_kimi_herdr_stalled_prompt_fails_loudly() {
+  local id rec out rc
+  id=kimi-herdr-stall-z6
+  rec=$(make_spawn_herdr_case herdr-stall "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_HERDR_AGENT_PROMPT_STALL=1 run_spawn_herdr \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a stalled herdr agent prompt must fail the spawn"
+  assert_contains "$out" "herdr agent prompt did not accept the kimi brief pointer" \
+    "a stalled herdr agent prompt lacked its loud diagnostic"
+  assert_contains "$out" "agent_prompt_stalled" "the stall diagnostic did not name the herdr error code"
+  assert_grep 'failed: herdr agent prompt did not accept the kimi brief pointer' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
+    "the stalled herdr agent prompt did not leave a supervisor-visible failure"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "a stalled prompt was logged as delivered"
+  [ ! -s "$CASE_DIR/pane-pointer.log" ] || fail "a stalled prompt fell back to the pane plane"
+  pass "fm-spawn on herdr: a swallowed agent prompt fails loudly instead of dropping the brief"
+}
+
+test_kimi_herdr_unreached_agent_idle_fails_before_delivery() {
+  local id rec out rc
+  id=kimi-herdr-notidle-z7
+  rec=$(make_spawn_herdr_case herdr-notidle "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_READY=no FM_BACKEND_HERDR_AGENT_REGISTER_RETRIES=2 run_spawn_herdr \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a kimi that never registers an idle herdr agent must fail the spawn"
+  assert_contains "$out" "kimi did not reach an idle herdr agent state" \
+    "the never-idle herdr readiness failure lacked its loud diagnostic"
+  assert_grep 'failed: kimi did not reach an idle herdr agent state' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
+    "the never-idle herdr readiness failure did not leave a supervisor-visible failure"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "the pointer was sent before herdr agent readiness"
+  [ ! -s "$CASE_DIR/pane-pointer.log" ] || fail "the pointer reached the pane plane before readiness"
+  pass "fm-spawn on herdr: the brief pointer waits for a verified idle agent and never rides the pane plane"
+}
+
 test_kimi_detection_uses_ancestry_after_markers() {
   local dir fakebin cfg out
   dir="$TMP_ROOT/detection"
@@ -1580,6 +1978,10 @@ test_kimi_failed_viewport_read_fails_readiness_at_once
 test_kimi_partial_trust_dialog_blocks_the_ready_verdict
 test_kimi_stuck_trust_dialog_fails_before_delivery
 test_kimi_trust_detection_requires_the_complete_dialog
+test_kimi_herdr_delivers_pointer_through_the_agent_plane
+test_kimi_herdr_idle_empty_composer_does_not_false_confirm_delivery
+test_kimi_herdr_stalled_prompt_fails_loudly
+test_kimi_herdr_unreached_agent_idle_fails_before_delivery
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines

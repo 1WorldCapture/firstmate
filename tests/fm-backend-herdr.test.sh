@@ -175,7 +175,19 @@ SH
 # agent_status (set via fake_herdr_set_agent_status, never through a CLI
 # call - mirrors an out-of-band agent registering itself) or an
 # agent_not_found error when none was preset (verified real-herdr behavior for
-# a pane with no registered agent). Every call is logged to $FM_HERDR_LOG in
+# a pane with no registered agent); `pane get <pane>` answers a live tab's
+# foreground_cwd from $FM_FAKE_PANE_PATH (or pane_not_found for a stranger) and
+# deliberately omits the frozen-at-creation `.cwd` field the adapter must never
+# read; `agent wait <pane> --until idle` counts its calls in state and answers
+# agent_not_found (rc 1) for the first $FM_FAKE_HERDR_AGENT_WAIT_IDLE_AFTER
+# calls and for any pane with no preset status, idle (rc 0) once the preset
+# status IS idle, and an agent_wait_timeout error (rc 1) for any other preset
+# status, mirroring the verified real-CLI shape where the not-found
+# registration race fails fast instead of waiting; `agent prompt <pane> <text>`
+# flips the pane's preset status to working, appends the text to
+# $FM_FAKE_HERDR_PROMPT_LOG when set, and answers agent_prompted (rc 0), or an
+# agent_prompt_stalled error (rc 1) when FM_FAKE_HERDR_AGENT_PROMPT_STALL=1
+# models a swallowed submission. Every call is logged to $FM_HERDR_LOG in
 # the same unit-separated form as make_herdr_fakebin.
 make_herdr_statefake() {  # <dir> -> echoes fakebin dir; seeds an empty state file
   local dir=$1 fb="$1/fakebin"
@@ -254,6 +266,47 @@ case "$cmd $sub" in
     else
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$pane"
     fi
+    ;;
+  "pane get")
+    pane=${3:-}
+    if [ "$(jq_state --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" -ge 1 ]; then
+      jq -n --arg p "$pane" --arg fg "${FM_FAKE_PANE_PATH:-$PWD}" \
+        '{result:{pane:{pane_id:$p,foreground_cwd:$fg}}}'
+    else
+      printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}\n' "$pane" >&2
+      exit 1
+    fi
+    ;;
+  "agent wait")
+    pane=${3:-}
+    calls=$(( $(jq_state -r '.agent_wait_calls // 0') + 1 ))
+    jq_state --argjson c "$calls" '.agent_wait_calls = $c' | save
+    status=$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')
+    if [ "$calls" -le "${FM_FAKE_HERDR_AGENT_WAIT_IDLE_AFTER:-0}" ] || [ -z "$status" ]; then
+      printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$pane" >&2
+      exit 1
+    fi
+    if [ "$status" = idle ]; then
+      printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+    else
+      printf '{"error":{"code":"agent_wait_timeout","message":"agent target %s did not reach idle before the timeout"}}\n' "$pane" >&2
+      exit 1
+    fi
+    ;;
+  "agent prompt")
+    pane=${3:-} text=${4:-}
+    status=$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')
+    if [ -z "$status" ]; then
+      printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$pane" >&2
+      exit 1
+    fi
+    if [ "${FM_FAKE_HERDR_AGENT_PROMPT_STALL:-0}" = 1 ]; then
+      printf '{"error":{"code":"agent_prompt_stalled","message":"agent target %s never reached working after the prompt"}}\n' "$pane" >&2
+      exit 1
+    fi
+    jq_state --arg p "$pane" '.agent_status[$p] = "working"' | save
+    [ -z "${FM_FAKE_HERDR_PROMPT_LOG:-}" ] || printf '%s\n' "$text" >> "$FM_FAKE_HERDR_PROMPT_LOG"
+    printf '{"result":{"type":"agent_prompted","agent":{"agent_status":"working"},"screen_detection_skipped":true}}\n'
     ;;
   *) : ;;
 esac
@@ -3835,6 +3888,110 @@ test_busy_state_unknown_on_no_agent() {
   pass "fm_backend_herdr_busy_state: unparseable/absent agent state reports unknown, the regex-fallback cue"
 }
 
+# --- agent plane: bounded idle wait and prompted delivery ---------------------
+#
+# The kimi-on-herdr brief-pointer path routes readiness and delivery through
+# herdr's agent plane (agent wait / agent prompt) instead of the pane plane,
+# because the pane plane swallows input inside kimi's startup window. These
+# pin the adapter's two agent-plane primitives against the stateful fake: the
+# registration race is retried then ridden out, a never-idle agent expires
+# loudly after ONE call, an unregistered agent gives up at the retry bound,
+# a prompt is proven by the working observation, and a swallowed prompt
+# surfaces as agent_prompt_stalled rather than silent success.
+
+test_wait_agent_idle_retries_the_registration_race() {
+  local dir log state fb out rc waits
+  dir="$TMP_ROOT/wait-idle"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  fake_herdr_set_agent_status "$state" w1:p2 idle
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    FM_FAKE_HERDR_AGENT_WAIT_IDLE_AFTER=2 FM_BACKEND_HERDR_AGENT_REGISTER_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_agent_idle fmtest:w1:p2 5000' "$ROOT" )
+  rc=$?
+  expect_code 0 "$rc" "wait_agent_idle should ride out the registration race once idle follows"
+  [ "$out" = idle ] || fail "wait_agent_idle should echo idle, got '$out'"
+  waits=$(grep -c "$(printf 'agent\x1fwait\x1fw1:p2')" "$log")
+  expect_code 3 "$waits" "wait_agent_idle should make exactly 3 agent wait calls (2 not-found + 1 idle), log shows $waits"
+  pass "fm_backend_herdr_wait_agent_idle: retries the agent_not_found registration race until idle"
+}
+
+test_wait_agent_idle_expires_after_one_call_when_never_idle() {
+  local dir log state fb out rc waits
+  dir="$TMP_ROOT/wait-expire"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  fake_herdr_set_agent_status "$state" w1:p2 working
+  rc=0
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    FM_BACKEND_HERDR_AGENT_REGISTER_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_agent_idle fmtest:w1:p2 5000' "$ROOT" ) || rc=$?
+  expect_code 1 "$rc" "a registered agent that never idles should fail the wait"
+  [ "$out" = wait-expired ] || fail "a never-idle wait should echo wait-expired, got '$out'"
+  waits=$(grep -c "$(printf 'agent\x1fwait\x1fw1:p2')" "$log")
+  expect_code 1 "$waits" "a non-not-found failure must not be retried, log shows $waits agent wait calls"
+  pass "fm_backend_herdr_wait_agent_idle: a never-idle agent expires loudly after one call, never retried"
+}
+
+test_wait_agent_idle_gives_up_when_registration_outruns_retries() {
+  local dir log state fb out rc waits
+  dir="$TMP_ROOT/wait-never"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  rc=0
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    FM_BACKEND_HERDR_AGENT_REGISTER_RETRIES=2 FM_BACKEND_HERDR_AGENT_REGISTER_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_agent_idle fmtest:w1:p2 5000' "$ROOT" ) || rc=$?
+  expect_code 1 "$rc" "an agent that never registers should fail the wait"
+  [ "$out" = not-found ] || fail "an exhausted registration race should echo not-found, got '$out'"
+  waits=$(grep -c "$(printf 'agent\x1fwait\x1fw1:p2')" "$log")
+  expect_code 2 "$waits" "the registration race should stop at its retry bound, log shows $waits agent wait calls"
+  pass "fm_backend_herdr_wait_agent_idle: an unregistered agent gives up at the retry bound instead of hanging"
+}
+
+test_agent_prompt_delivers_and_observes_working() {
+  local dir log state fb out rc
+  dir="$TMP_ROOT/prompt-ok"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  fake_herdr_set_agent_status "$state" w1:p2 idle
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_prompt fmtest:w1:p2 "Read the brief." 5000' "$ROOT" )
+  rc=$?
+  expect_code 0 "$rc" "an accepted prompt observed working should succeed"
+  [ "$out" = prompted ] || fail "an accepted prompt should echo prompted, got '$out'"
+  [ "$(jq -r '.agent_status["w1:p2"]' "$state")" = working ] \
+    || fail "an accepted prompt should leave the agent observed working, state shows $(cat "$state")"
+  assert_contains "$(cat "$log")" "$(printf 'agent\x1fprompt\x1fw1:p2\x1fRead the brief.\x1f--wait\x1f--until\x1fworking')" \
+    "agent_prompt did not deliver the text through the agent prompt plane with a working observation"
+  pass "fm_backend_herdr_agent_prompt: delivers the text and proves it by the working observation"
+}
+
+test_agent_prompt_stall_fails_loudly() {
+  local dir log state fb out rc
+  dir="$TMP_ROOT/prompt-stall"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  fake_herdr_set_agent_status "$state" w1:p2 idle
+  rc=0
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    FM_FAKE_HERDR_AGENT_PROMPT_STALL=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_prompt fmtest:w1:p2 "Read the brief." 5000' "$ROOT" ) || rc=$?
+  expect_code 1 "$rc" "a swallowed prompt submission should fail"
+  [ "$out" = agent_prompt_stalled ] || fail "a swallowed prompt should echo agent_prompt_stalled, got '$out'"
+  pass "fm_backend_herdr_agent_prompt: a swallowed submission fails loudly as agent_prompt_stalled"
+}
+
+test_agent_plane_dispatch_refuses_backends_without_the_plane() {
+  local out rc
+  rc=0
+  out=$( bash -c '. "$0/bin/fm-backend.sh"; fm_backend_wait_agent_idle tmux default:w1:p2 1000' "$ROOT" 2>&1 ) || rc=$?
+  expect_code 1 "$rc" "wait_agent_idle on a backend without an agent plane should refuse"
+  assert_contains "$out" "no agent-idle wait implementation for backend 'tmux'" \
+    "wait_agent_idle on tmux lacked its loud routing refusal"
+  rc=0
+  out=$( bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_prompt zellij default:w1:p2 hi 1000' "$ROOT" 2>&1 ) || rc=$?
+  expect_code 1 "$rc" "agent_prompt on a backend without an agent plane should refuse"
+  assert_contains "$out" "no agent prompt implementation for backend 'zellij'" \
+    "agent_prompt on zellij lacked its loud routing refusal"
+  pass "fm-backend dispatch: the agent-plane primitives refuse backends that have no agent plane"
+}
+
 # --- composer_state: structural border-row classification --------------------
 
 test_composer_state_bare_prompt_is_empty() {
@@ -5818,6 +5975,12 @@ test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
+test_wait_agent_idle_retries_the_registration_race
+test_wait_agent_idle_expires_after_one_call_when_never_idle
+test_wait_agent_idle_gives_up_when_registration_outruns_retries
+test_agent_prompt_delivers_and_observes_working
+test_agent_prompt_stall_fails_loudly
+test_agent_plane_dispatch_refuses_backends_without_the_plane
 test_composer_state_bare_prompt_is_empty
 test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending

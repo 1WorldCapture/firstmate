@@ -5203,23 +5203,46 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
-  if ! kimi_wait_for_ready; then
-    kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"
-    exit 1
-  fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
-  KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
-  KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
-  KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
-  if ! KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
-    "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
-    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W"); then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
-    exit 1
-  fi
-  if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
-    exit 1
+  # On herdr the pane plane swallows input inside kimi's startup window
+  # while herdr's cursorless classifier already calls the composer ready,
+  # and the shared submit core then false-confirms idle+empty as landed, so
+  # herdr alone routes readiness and delivery through the AGENT plane:
+  # readiness is a bounded agent-idle wait (kimi reports idle once its TUI
+  # accepts input; the registration race retries live in the adapter), and
+  # the pointer rides an agent prompt that blocks until kimi is observed
+  # working, failing loudly when it swallows the submission. Every other
+  # backend keeps the pane-plane readiness gate and submit core, and both
+  # paths end at the same screen-evidence delivery postcondition below.
+  if [ "$BACKEND" = herdr ]; then
+    if ! KIMI_HERDR_READY=$(fm_backend_wait_agent_idle "$BACKEND" "$T" \
+        "${FM_KIMI_HERDR_READY_TIMEOUT_MS:-30000}"); then
+      kimi_spawn_fail "kimi did not reach an idle herdr agent state before brief delivery (last: $KIMI_HERDR_READY)"
+      exit 1
+    fi
+    if ! KIMI_HERDR_PROMPT=$(fm_backend_agent_prompt "$BACKEND" "$T" "$KIMI_POINTER" \
+        "${FM_KIMI_HERDR_PROMPT_TIMEOUT_MS:-60000}"); then
+      kimi_spawn_fail "herdr agent prompt did not accept the kimi brief pointer ($KIMI_HERDR_PROMPT)"
+      exit 1
+    fi
+  else
+    if ! kimi_wait_for_ready; then
+      kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"
+      exit 1
+    fi
+    KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
+    KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
+    KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
+    if ! KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+        "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
+        "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W"); then
+      kimi_spawn_fail "kimi brief pointer could not be submitted"
+      exit 1
+    fi
+    if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
+      kimi_spawn_fail "kimi brief pointer could not be submitted"
+      exit 1
+    fi
   fi
   if ! kimi_wait_for_delivery; then
     kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
